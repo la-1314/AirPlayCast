@@ -8,6 +8,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.miui.airplaycast.airplay.LocalMediaServer
 import com.miui.airplaycast.airplay.MediaCastSession
+import com.miui.airplaycast.airplay.MirrorState
 import com.miui.airplaycast.airplay.MirroringSession
 import com.miui.airplaycast.capture.ScreenCaptureManager
 import com.miui.airplaycast.capture.ScreenCaptureService
@@ -36,7 +37,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val mediaSession: StateFlow<MediaCastSession?> = _mediaSession.asStateFlow()
 
     // 屏幕镜像状态
-    val mirrorState: StateFlow<MirroringSession.MirrorState> = MirroringSession.state
+    val mirrorState: StateFlow<MirrorState> = MirroringSession.state
     val captureState: StateFlow<ScreenCaptureManager.CaptureState> = ScreenCaptureManager.state
 
     // 投屏 URL

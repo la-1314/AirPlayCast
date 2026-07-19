@@ -11,6 +11,7 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -264,7 +265,7 @@ private fun HeroCard(
         Column(modifier = Modifier.fillMaxSize()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
-                    if (mode == 0) Icons.Rounded.ScreenMirror else Icons.Rounded.Cast,
+                    if (mode == 0) Icons.Rounded.ScreenShare else Icons.Rounded.Cast,
                     contentDescription = null,
                     tint = Color.White,
                     modifier = Modifier.size(28.dp)
@@ -350,7 +351,7 @@ private fun MirroringActions(
         if (!running) {
             MiPrimaryButton(
                 text = "开始镜像",
-                icon = Icons.Rounded.ScreenMirror,
+                icon = Icons.Rounded.ScreenShare,
                 modifier = Modifier.fillMaxWidth(),
                 onClick = onStart
             )

@@ -7,8 +7,10 @@ import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.util.DisplayMetrics
 import android.util.Log
+import android.view.DisplayManager
 import android.view.Surface
 import android.view.WindowManager
+import com.miui.airplaycast.airplay.MirroringSession
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -121,9 +123,9 @@ object ScreenCaptureManager {
         return Triple(w, h, metrics.densityDpi)
     }
 
-    private const val DisplayDefaultFlags =
-        android.view.DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR or
-        android.view.DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
+    private val DisplayDefaultFlags =
+        DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR or
+        DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
 
     sealed class CaptureState {
         object Idle : CaptureState()
