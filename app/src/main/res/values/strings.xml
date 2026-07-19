@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AirPlay 投屏</string>
+    <string name="notification_channel_capture">屏幕捕获</string>
+    <string name="notification_capturing_title">正在投屏</string>
+    <string name="notification_capturing_text">屏幕镜像到 AirPlay 接收端</string>
+    <string name="action_start_mirroring">开始镜像</string>
+    <string name="action_stop_mirroring">停止镜像</string>
+    <string name="action_cast_url">投放 URL</string>
+    <string name="action_pick_file">选择文件</string>
+    <string name="action_start_cast">开始投放</string>
+    <string name="label_mode_mirror">屏幕镜像</string>
+    <string name="label_mode_media">媒体投放</string>
+    <string name="label_available_devices">可用设备</string>
+    <string name="hint_url">http://example.com/video.mp4</string>
+    <string name="empty_devices_title">暂未发现 AirPlay 设备</string>
+    <string name="empty_devices_desc">请确保设备已连接同一 WiFi 网络且接收端已开启</string>
+    <string name="no_device_selected">请先选择设备</string>
+</resources>
