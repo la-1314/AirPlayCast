@@ -28,7 +28,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 object MirroringSession {
     private const val TAG = "MirroringSession"
 
-    private val _state = MutableStateFlow(MirrorState.Idle)
+    private val _state = MutableStateFlow<MirrorState>(MirrorState.Idle)
     val state: StateFlow<MirrorState> = _state.asStateFlow()
 
     private var scope: CoroutineScope? = null

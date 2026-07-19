@@ -31,7 +31,7 @@ import kotlinx.coroutines.flow.asStateFlow
 object ScreenCaptureManager {
     private const val TAG = "ScreenCaptureManager"
 
-    private val _state = MutableStateFlow(CaptureState.Idle)
+    private val _state = MutableStateFlow<CaptureState>(CaptureState.Idle)
     val state: StateFlow<CaptureState> = _state.asStateFlow()
 
     private var projection: MediaProjection? = null
