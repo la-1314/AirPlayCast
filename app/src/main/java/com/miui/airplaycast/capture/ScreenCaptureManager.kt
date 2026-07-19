@@ -7,7 +7,7 @@ import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.util.DisplayMetrics
 import android.util.Log
-import android.view.DisplayManager
+import android.hardware.display.DisplayManager
 import android.view.Surface
 import android.view.WindowManager
 import com.miui.airplaycast.airplay.MirroringSession
