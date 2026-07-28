@@ -56,6 +56,8 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
     val mediaSession by viewModel.mediaSession.collectAsState()
     val mirrorState by viewModel.mirrorState.collectAsState()
     val captureState by viewModel.captureState.collectAsState()
+    val pinRequest by viewModel.pinRequest.collectAsState()
+    val lastError by viewModel.lastError.collectAsState()
 
     var urlInput by remember(castUrl) { mutableStateOf(castUrl) }
     val snackbarHostState = remember { SnackbarHostState() }
@@ -238,7 +240,93 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
             hostState = snackbarHostState,
             modifier = Modifier.align(Alignment.BottomCenter)
         ) { data -> Snackbar(snackbarData = data) }
+
+        // PIN 配对输入对话框
+        // 当目标设备要求 PIN 时弹出，用户输入屏幕显示的 4 位 PIN 码
+        if (pinRequest != null) {
+            PinInputDialog(
+                deviceName = pinRequest!!.deviceName,
+                hint = pinRequest!!.hint,
+                onSubmit = { pin -> viewModel.submitPin(pin) },
+                onCancel = { viewModel.cancelPin() }
+            )
+        }
     }
+}
+
+/**
+ * PIN 码输入对话框
+ *
+ * 用于 AirPlay 接收端要求 PIN 配对时收集用户输入
+ * (PIN 通常显示在接收端屏幕上，4 位数字)
+ */
+@Composable
+private fun PinInputDialog(
+    deviceName: String,
+    hint: String,
+    onSubmit: (String) -> Unit,
+    onCancel: () -> Unit
+) {
+    var pin by remember { mutableStateOf("") }
+    val isError = pin.isNotEmpty() && (pin.length != 4 || !pin.all { it.isDigit() })
+
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Rounded.Lock,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("输入投屏 PIN 码", fontWeight = FontWeight.SemiBold)
+            }
+        },
+        text = {
+            Column {
+                Text(
+                    text = "设备「$deviceName」要求 PIN 配对",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = hint,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = pin,
+                    onValueChange = { value ->
+                        // 仅允许数字，最多 4 位
+                        pin = value.filter { it.isDigit() }.take(4)
+                    },
+                    placeholder = { Text("4 位数字") },
+                    isError = isError,
+                    supportingText = if (isError) {
+                        { Text("PIN 必须为 4 位数字") }
+                    } else null,
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    shape = RoundedCornerShape(14.dp)
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onSubmit(pin) },
+                enabled = pin.length == 4 && !isError,
+                shape = RoundedCornerShape(12.dp)
+            ) { Text("确认配对") }
+        },
+        dismissButton = {
+            TextButton(onClick = onCancel) { Text("取消") }
+        }
+    )
 }
 
 @Composable
