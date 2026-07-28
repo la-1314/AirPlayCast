@@ -7,6 +7,10 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+  issues: write
+
 jobs:
   build:
     name: Build Debug APK
@@ -78,10 +82,25 @@ jobs:
             echo "---"
             echo "[查看完整运行日志](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
           } > /tmp/issue-body.md
+          # 尝试创建 Issue (失败时输出错误但不阻断)
           gh issue create \
             --title "构建失败: ${COMMIT_SHA}" \
-            --body-file /tmp/issue-body.md \
-            || echo "Issue 创建失败，错误日志已在上一步输出"
+            --body-file /tmp/issue-body.md 2>&1 || true
+
+      - name: Commit Build Log on Failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 将构建日志提交到仓库，便于离线读取
+          COMMIT_SHA=$(git rev-parse --short HEAD)
+          mkdir -p build-logs
+          tail -300 /tmp/build.log > "build-logs/failure-${COMMIT_SHA}.log" 2>/dev/null || echo "no log" > "build-logs/failure-${COMMIT_SHA}.log"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "build-logs/failure-${COMMIT_SHA}.log"
+          git commit -m "chore: 保存构建失败日志 ${COMMIT_SHA} [skip ci]"
+          git push
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
