@@ -243,10 +243,12 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
 
         // PIN 配对输入对话框
         // 当目标设备要求 PIN 时弹出，用户输入屏幕显示的 4 位 PIN 码
+        // errorHint 非空时表示上次 PIN 错误，显示重试提示
         if (pinRequest != null) {
             PinInputDialog(
                 deviceName = pinRequest!!.deviceName,
                 hint = pinRequest!!.hint,
+                errorHint = pinRequest!!.errorHint,
                 onSubmit = { pin -> viewModel.submitPin(pin) },
                 onCancel = { viewModel.cancelPin() }
             )
@@ -259,15 +261,19 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
  *
  * 用于 AirPlay 接收端要求 PIN 配对时收集用户输入
  * (PIN 通常显示在接收端屏幕上，4 位数字)
+ *
+ * @param errorHint 重试时的错误提示 (首次为 null)，非空时以红色显示
  */
 @Composable
 private fun PinInputDialog(
     deviceName: String,
     hint: String,
+    errorHint: String?,
     onSubmit: (String) -> Unit,
     onCancel: () -> Unit
 ) {
-    var pin by remember { mutableStateOf("") }
+    // errorHint 变化时清空输入 (重试场景)
+    var pin by remember(errorHint) { mutableStateOf("") }
     val isError = pin.isNotEmpty() && (pin.length != 4 || !pin.all { it.isDigit() })
 
     AlertDialog(
@@ -297,6 +303,25 @@ private fun PinInputDialog(
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                // 重试时显示错误提示
+                if (errorHint != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Rounded.Error,
+                            contentDescription = null,
+                            tint = MiError,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = errorHint,
+                            fontSize = 12.sp,
+                            color = MiError,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     value = pin,
@@ -644,7 +669,6 @@ private fun buildDeviceStatus(device: AirPlayDevice): String? {
 
 private fun getLocalIp(context: android.content.Context): String? {
     return runCatching {
-        // 使用 NetworkInterface 获取本机 IP
         val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
         for (intf in interfaces) {
             if (!intf.isUp || intf.isLoopback) continue
