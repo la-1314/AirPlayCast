@@ -61,6 +61,28 @@ jobs:
           echo "=== Last 200 lines of build output ==="
           tail -200 /tmp/build.log || true
 
+      - name: Report Build Errors as Issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 提取编译错误并创建 Issue，便于离线诊断
+          COMMIT_SHA=$(git rev-parse --short HEAD)
+          {
+            echo "## 构建失败日志 (commit ${COMMIT_SHA})"
+            echo ""
+            echo '```'
+            tail -200 /tmp/build.log 2>/dev/null || echo "no log"
+            echo '```'
+            echo ""
+            echo "---"
+            echo "[查看完整运行日志](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+          } > /tmp/issue-body.md
+          gh issue create \
+            --title "构建失败: ${COMMIT_SHA}" \
+            --body-file /tmp/issue-body.md \
+            || echo "Issue 创建失败，错误日志已在上一步输出"
+
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
