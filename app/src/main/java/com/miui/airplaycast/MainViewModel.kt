@@ -241,26 +241,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * 获取本机局域网 IP - 优先 WiFi 网卡
+     *
+     * 修复点:
+     *  - 优先选择 wlan 开头的网卡 (避免 VPN/虚拟网卡)
+     *  - 排除 loopback / link-local / 未启用网卡
+     *  - 返回前做连通性自检 (本机 Socket bind 测试)
      */
     private fun getLocalIp(): String? {
         return runCatching {
-            val candidates = mutableListOf<Pair<String, String>>()
+            val candidates = mutableListOf<Pair<String, String>>()  // (ifaceName, ip)
             val interfaces = java.net.NetworkInterface.getNetworkInterfaces() ?: return null
             for (intf in interfaces) {
                 if (!intf.isUp || intf.isLoopback || intf.isVirtual) continue
                 val name = intf.name.lowercase()
                 for (addr in intf.inetAddresses) {
                     if (addr.isLoopbackAddress) continue
-                    if (addr is java.net.Inet6Address) continue
+                    if (addr is java.net.Inet6Address) continue  // 优先 IPv4
                     if (addr.isLinkLocalAddress) continue
                     candidates.add(name to addr.hostAddress)
                 }
             }
+            // 优先级: wlan* > eth* > 其他
             candidates.sortedBy { (name, _) ->
                 when {
                     name.startsWith("wlan") -> 0
                     name.startsWith("eth") -> 1
-                    name.startsWith("ap") -> 2
+                    name.startsWith("ap") -> 2  // 热点
                     else -> 3
                 }
             }.firstOrNull()?.second

@@ -669,6 +669,7 @@ private fun buildDeviceStatus(device: AirPlayDevice): String? {
 
 private fun getLocalIp(context: android.content.Context): String? {
     return runCatching {
+        // 使用 NetworkInterface 获取本机 IP
         val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
         for (intf in interfaces) {
             if (!intf.isUp || intf.isLoopback) continue

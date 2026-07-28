@@ -13,6 +13,12 @@ import kotlinx.coroutines.flow.asStateFlow
  *  - HTTP URL 投放 (远程视频 URL)
  *  - 本地媒体文件投放 (需先启动本地 HTTP 服务)
  *  - 播放控制: 播放/暂停/停止/跳转/音量
+ *
+ * 完整流程:
+ *  1. GET /server-info 探测设备能力 (是否需要配对)
+ *  2. POST /reverse 建立反向通道
+ *  3. POST /play 投放媒体
+ *  4. /rate /stop /scrub /volume 控制
  */
 class MediaCastSession(
     private val device: AirPlayDevice
@@ -110,6 +116,7 @@ class MediaCastSession(
                                         return false
                                     }
                                     Log.w(TAG, "PIN pairing attempt $attempts failed: ${pairResult.error.displayText}, retrying...")
+                                    // 循环回到 while 重新请求 PIN
                                 }
                             }
                         }
@@ -179,6 +186,9 @@ class MediaCastSession(
         }
     }
 
+    /**
+     * 拉取最新播放进度
+     */
     fun updateProgress() {
         if (_state.value !is MediaCastState.Playing) return
         when (val r = client.queryScrub()) {
