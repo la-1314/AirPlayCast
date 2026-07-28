@@ -81,6 +81,10 @@ dependencies {
     // Gson for parsing AirPlay server-info JSON
     implementation("com.google.code.gson:gson:2.11.0")
 
-    // DataStore for preferences
+    // BouncyCastle - HomeKit Pair-Setup 需要 Ed25519 / ChaCha20-Poly1305 / HKDF
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
+
+    // DataStore for preferences (持久化 HomeKit 配对凭证)
     implementation("androidx.datastore:datastore-preferences:1.1.1")
 }

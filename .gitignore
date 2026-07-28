@@ -77,3 +77,7 @@ gradle/wrapper/gradle-wrapper.jar
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local tool version manager (mise/asdf)
+mise.toml
+.tool-versions
