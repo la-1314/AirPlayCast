@@ -1,29 +1,33 @@
 package com.miui.airplaycast.airplay
 
+import android.content.Context
 import android.util.Log
-import com.miui.airplaycast.capture.EncodedFrame
-import com.miui.airplaycast.capture.H264Encoder
 import com.miui.airplaycast.discovery.AirPlayDevice
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentLinkedQueue
 
 /**
  * AirPlay 屏幕镜像会话
  *
- * 工作流:
- *  1. POST /info  发送设备能力 plist
- *  2. SETUP /stream  建立流通道 (返回 server_port)
- *  3. RECORD       开始录制 (服务端开始接收)
- *  4. POST /stream  持续推送 H.264 NAL 数据
- *  5. TEARDOWN     关闭会话
+ * 工作流 (修复后):
+ *  1. GET /server-info (HTTP 7000) 查询设备能力 + 确认支持镜像
+ *  2. 连接 RTSP 端口 7100 (而非 HTTP 7000)
+ *  3. POST /info (plist 含真实 MAC、deviceID、pi、vm)
+ *  4. SETUP /stream (携带 plist 请求体, 解析响应的 Session ID)
+ *  5. RECORD (使用服务端 Session ID)
+ *  6. POST /stream 持续推送 H.264 NAL 帧 (带 4 字节时间戳前缀)
+ *  7. TEARDOWN 关闭会话
  *
- * 重要限制:
- *  AirPlay 2 镜像的 H.264 数据需经过 FairPlay 加密
- *  Apple 官方接收端 (Apple TV) 会拒绝未加密的流
- *  本实现可对部分开源接收端 (如 UxPlay 自定义模式) 工作
+ * 重要修复:
+ *  - 端口: device.port (7000) -> MIRROR_DEFAULT_PORT (7100)
+ *  - SETUP: 携带 plist 请求体
+ *  - RECORD: 使用 SETUP 响应返回的 serverSessionId
+ *  - plist: 真实 MAC + features 字符串 + pi/vm/deviceID
+ *  - 启动顺序: 先启动编码器产出关键帧，再发 RECORD (由调用方协调)
  */
 object MirroringSession {
     private const val TAG = "MirroringSession"
@@ -34,111 +38,234 @@ object MirroringSession {
     private var scope: CoroutineScope? = null
     private var rtsp: RtspClient? = null
     private var targetDevice: AirPlayDevice? = null
+    private var contextRef: Context? = null
 
-    private val frameQueue = ConcurrentLinkedQueue<Pair<ByteArray, Long>>()
+    private val frameQueue = ConcurrentLinkedQueue<MirrorFrame>()
+    @Volatile private var startTimeMs: Long = 0
 
     /**
-     * 启动镜像会话
+     * 启动镜像会话 (仅握手，不包含编码器启动)
+     *
+     * 调用方应:
+     *  1. 先调用 [start] 完成 RTSP 握手
+     *  2. 再启动 [com.miui.airplaycast.capture.ScreenCaptureManager] 产出关键帧
+     *  3. 通过 [enqueueFrame] 推送编码后的 NAL
+     *
+     * @param device AirPlay 接收端
+     * @param width  视频宽 (横屏)
+     * @param height 视频高
+     * @param context 用于获取 MAC 地址
+     * @return AirPlayResult<Unit>
      */
-    fun start(device: AirPlayDevice, width: Int, height: Int): Boolean {
+    fun start(device: AirPlayDevice, width: Int, height: Int, context: Context): AirPlayResult<Unit> =
+        start(device, width, height, context, onPinRequired = null)
+
+    /**
+     * 启动镜像会话 (带 PIN 配对回调)
+     *
+     * @param onPinRequired 当探测到设备要求 PIN 时调用 (在 IO 线程，回调内应阻塞等待用户输入)
+     *                     回调返回用户输入的 PIN 码，返回 null 表示用户取消
+     */
+    fun start(
+        device: AirPlayDevice,
+        width: Int,
+        height: Int,
+        context: Context,
+        onPinRequired: (suspend () -> String?)?
+    ): AirPlayResult<Unit> = airPlayTry {
         if (_state.value is MirrorState.Running) {
-            Log.w(TAG, "Mirroring already running")
-            return false
+            throw AirPlayException(AirPlayError.Unknown("镜像已在运行"))
         }
         _state.value = MirrorState.Connecting
         targetDevice = device
+        contextRef = context
 
         scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-        var ok = false
-        runCatching {
-            val client = RtspClient(device.host.hostAddress ?: "", device.port)
-            if (!client.connect()) {
-                _state.value = MirrorState.Error("RTSP 连接失败")
-                return false
-            }
-            rtsp = client
-
-            // 1. 发送 /info plist
-            val infoPlist = buildInfoPlist(width, height)
-            val infoResp = client.request(
-                AirPlayConstants.RTSP_METHOD_POST,
-                AirPlayConstants.MIRROR_RTSP_PATH_INFO,
-                headers = mapOf(
-                    "Content-Type" to "application/x-apple-plist",
-                    "X-Apple-ProtocolVersion" to "1"
-                ),
-                body = infoPlist.toByteArray(Charsets.UTF_8)
-            )
-
-            if (!infoResp.isSuccess) {
-                _state.value = MirrorState.Error("info 失败: ${infoResp.statusCode}")
-                return false
-            }
-
-            // 2. SETUP /stream
-            val setupResp = client.request(
-                AirPlayConstants.RTSP_METHOD_SETUP,
-                AirPlayConstants.MIRROR_RTSP_PATH_STREAM,
-                headers = mapOf(
-                    "Content-Type" to "application/x-apple-plist"
-                )
-            )
-
-            if (!setupResp.isSuccess) {
-                _state.value = MirrorState.Error("SETUP 失败: ${setupResp.statusCode}")
-                return false
-            }
-
-            // 3. RECORD
-            val recordResp = client.request(
-                AirPlayConstants.RTSP_METHOD_RECORD,
-                AirPlayConstants.MIRROR_RTSP_PATH_STREAM,
-                headers = mapOf(
-                    "Session" to client.sessionId
-                )
-            )
-
-            if (!recordResp.isSuccess) {
-                _state.value = MirrorState.Error("RECORD 失败: ${recordResp.statusCode}")
-                return false
-            }
-
-            _state.value = MirrorState.Running(device.name)
-            ok = true
-
-            // 4. 启动帧发送循环
-            scope?.launch { frameSenderLoop() }
-        }.onFailure {
-            Log.e(TAG, "Failed to start mirroring", it)
-            _state.value = MirrorState.Error(it.message ?: "未知错误")
-            return false
+        val hostAddress = device.host.hostAddress
+        if (hostAddress.isNullOrBlank()) {
+            throw AirPlayException(AirPlayError.Network(
+                "设备 ${device.name} 的 IP 地址为空，mDNS 解析可能未完成，请稍后重试"
+            ))
         }
-        return ok
+
+        val macAddress = DeviceInfo.getMacAddress(context)
+        Log.i(TAG, "Starting mirror to ${device.name} ($hostAddress), mac=$macAddress")
+
+        // 1. 先通过 HTTP /server-info 探测设备能力 (确认支持镜像)
+        val httpClient = AirPlayHttpClient(device)
+        val infoResult = httpClient.serverInfo()
+        var mirrorPort = AirPlayConstants.MIRROR_DEFAULT_PORT
+        if (infoResult is AirPlayResult.Failure) {
+            Log.w(TAG, "server-info 探测失败，继续尝试: ${infoResult.error.displayText}")
+        } else if (infoResult is AirPlayResult.Success) {
+            val si = infoResult.value
+            Log.i(TAG, "Server: model=${si.model}, featuresLow=0x${si.featuresLow.toString(16)}, featuresHigh=0x${si.featuresHigh.toString(16)}, mirror=${si.supportsMirroring}, auth=${si.requiresAuthentication}, airplay2=${si.isAirPlay2}")
+            // 不再基于 features 预判强制配对:
+            //   0x80 (FEATURE_AUTHENTICATION) 表示"支持认证"，开源接收端 (UxPlay) 几乎都置位但不一定强制 PIN
+            //   真正的强制配对由握手时返回 401/403 触发，由 PairingManager 处理
+            if (!si.supportsMirroring && !device.supportsMirroring) {
+                Log.w(TAG, "Device may not support mirroring, continuing anyway")
+            }
+            // TODO: 当 server-info 返回明确的镜像端口字段时，覆盖 mirrorPort (P1-4)
+        }
+
+        // 1.5 探测 PIN 配对需求
+        //     提前探测避免握手时才返回 401，改善用户体验
+        if (onPinRequired != null) {
+            runCatching {
+                val pairing = com.miui.airplaycast.airplay.pairing.PairingManager(device)
+                when (val probe = pairing.isPinRequired()) {
+                    is AirPlayResult.Success -> {
+                        if (probe.value) {
+                            Log.i(TAG, "Device requires PIN pairing, requesting user input")
+                            val pin = onPinRequired.invoke()
+                            if (pin.isNullOrBlank()) {
+                                throw AirPlayException(AirPlayError.PairingRequired("用户取消 PIN 输入"))
+                            }
+                            when (val pairResult = pairing.pairSetupWithPin(pin)) {
+                                is AirPlayResult.Success -> Log.i(TAG, "PIN pairing succeeded, continuing handshake")
+                                is AirPlayResult.Failure -> throw AirPlayException(pairResult.error)
+                            }
+                        } else {
+                            Log.i(TAG, "Device does not require PIN")
+                        }
+                    }
+                    is AirPlayResult.Failure -> {
+                        Log.w(TAG, "PIN probe failed (non-fatal): ${probe.error.displayText}")
+                        // 探测失败不阻断，握手时若需要配对会再次返回 401
+                    }
+                }
+            }.onFailure {
+                Log.w(TAG, "PIN pairing flow error: ${it.message}")
+                // 若是用户取消或明确配对错误，向上抛出
+                if (it is AirPlayException) throw it
+            }
+        }
+
+        // 2. 连接 RTSP 镜像端口 (默认 7100，可被 server-info 覆盖)
+        //    注意: 实际 AirPlay 镜像端口可由 /server-info 返回的字段或 mDNS TXT 推断，
+        //    大多数接收端 (含 UxPlay) 固定使用 7100
+        val client = RtspClient(hostAddress, mirrorPort)
+        client.connect()  // 失败会抛 AirPlayException
+        rtsp = client
+
+        // 3. POST /info (plist 含真实 MAC、deviceID、pi、vm)
+        val infoPlist = PlistBuilder.buildMirrorInfoPlist(
+            width = width,
+            height = height,
+            macAddress = macAddress
+        )
+        val infoResp = client.request(
+            AirPlayConstants.RTSP_METHOD_POST,
+            AirPlayConstants.MIRROR_RTSP_PATH_INFO,
+            headers = mapOf(
+                AirPlayConstants.HEADER_X_APPLE_PROTOCOL_VERSION to "1"
+            ),
+            body = infoPlist.toByteArray(Charsets.UTF_8),
+            contentType = AirPlayConstants.CONTENT_TYPE_PLIST
+        )
+        if (!infoResp.isSuccess) {
+            throw AirPlayException(AirPlayError.HandshakeFailed(
+                "/info", infoResp.statusCode,
+                "镜像 info 协商失败 - 设备可能不支持镜像或协议版本不兼容"
+            ))
+        }
+        Log.i(TAG, "/info OK")
+
+        // 4. SETUP /stream (携带 plist 请求体 + 标准 RTSP Transport 头)
+        //    AirPlay 镜像使用单 RTP 流 (交错模式或 UDP)，Transport 头告诉服务端期望的传输模式
+        //    即使部分开源接收端不严格校验，补全头部可提升兼容性
+        val setupPlist = PlistBuilder.buildSetupPlist(macAddress)
+        val setupResp = client.request(
+            AirPlayConstants.RTSP_METHOD_SETUP,
+            AirPlayConstants.MIRROR_RTSP_PATH_STREAM,
+            headers = mapOf(
+                "Transport" to "RTP/AVP/TCP;unicast;interleaved=0-1;mode=record"
+            ),
+            body = setupPlist.toByteArray(Charsets.UTF_8),
+            contentType = AirPlayConstants.CONTENT_TYPE_PLIST
+        )
+        if (!setupResp.isSuccess) {
+            throw AirPlayException(AirPlayError.HandshakeFailed(
+                "SETUP", setupResp.statusCode,
+                "镜像流通道建立失败 - 设备可能要求 FairPlay 配对"
+            ))
+        }
+        // serverSessionId 已在 RtspClient.readResponse 中自动解析
+        Log.i(TAG, "SETUP OK, server session=${client.serverSessionId}")
+
+        // 5. RECORD (使用服务端返回的 Session + RTP-Info 头)
+        //    RTP-Info 声明初始 RTP 序列号与时间戳，部分严格 RTSP 实现要求 RECORD 必须携带
+        val recordPlist = PlistBuilder.buildRecordPlist(width, height)
+        val recordResp = client.request(
+            AirPlayConstants.RTSP_METHOD_RECORD,
+            AirPlayConstants.MIRROR_RTSP_PATH_STREAM,
+            headers = mapOf(
+                "RTP-Info" to "seq=0;rtptime=0"
+            ),
+            body = recordPlist.toByteArray(Charsets.UTF_8),
+            contentType = AirPlayConstants.CONTENT_TYPE_PLIST
+        )
+        if (!recordResp.isSuccess) {
+            throw AirPlayException(AirPlayError.HandshakeFailed(
+                "RECORD", recordResp.statusCode,
+                "镜像录制启动失败"
+            ))
+        }
+        Log.i(TAG, "RECORD OK, mirroring started")
+
+        startTimeMs = System.currentTimeMillis()
+        _state.value = MirrorState.Running(device.name)
+
+        // 6. 启动帧发送循环
+        scope?.launch { frameSenderLoop() }
+    }.onFailure { error ->
+        Log.e(TAG, "Mirror start failed: ${error.displayText}")
+        _state.value = MirrorState.Error(error.displayText)
+        cleanup()
     }
 
     fun stop() {
-        runCatching { rtsp?.request(AirPlayConstants.RTSP_METHOD_TEARDOWN, AirPlayConstants.MIRROR_RTSP_PATH_STREAM) }
+        runCatching {
+            rtsp?.request(
+                AirPlayConstants.RTSP_METHOD_TEARDOWN,
+                AirPlayConstants.MIRROR_RTSP_PATH_STREAM
+            )
+        }
+        cleanup()
+        _state.value = MirrorState.Idle
+    }
+
+    private fun cleanup() {
         runCatching { rtsp?.disconnect() }
         rtsp = null
         scope?.cancel()
         scope = null
         frameQueue.clear()
         targetDevice = null
-        _state.value = MirrorState.Idle
+        contextRef = null
     }
 
     /**
-     * 接收来自 H264Encoder 的编码帧
+     * 接收来自 H264Encoder 的编码帧，加入发送队列
+     *
+     * AirPlay 镜像帧格式:
+     *  [4 字节大端时间戳 (90kHz 时钟)] + [H.264 NAL 数据 (Annex B 格式)]
+     *
+     * 时间戳单位: 90kHz 时钟 (即 1 秒 = 90000 单位)
+     *   presentationTimeUs (微秒) → 90kHz: pts = us * 90 / 1000
+     *   早期实现误用毫秒导致服务端解码时序错乱、画面卡顿
      */
     fun enqueueFrame(nalData: ByteArray, isKeyFrame: Boolean, presentationTimeUs: Long) {
         if (_state.value !is MirrorState.Running) return
-        frameQueue.add(nalData to presentationTimeUs)
+        // 90kHz 时钟: 1 us = 0.09 tick
+        val pts90k = ((presentationTimeUs * 90) / 1000).toInt() and 0x7FFFFFFF
+        frameQueue.add(MirrorFrame(nalData, isKeyFrame, pts90k))
         if (frameQueue.size > 60) {
-            // 防止积压过多, 丢帧到关键帧
             var dropped = 0
             while (frameQueue.size > 30) {
-                val p = frameQueue.poll() ?: break
+                frameQueue.poll() ?: break
                 dropped++
             }
             Log.w(TAG, "Dropped $dropped frames due to backpressure")
@@ -147,67 +274,49 @@ object MirroringSession {
 
     private suspend fun frameSenderLoop() {
         while (scope?.isActive == true && _state.value is MirrorState.Running) {
-            val pair = frameQueue.poll()
-            if (pair == null) {
+            val frame = frameQueue.poll()
+            if (frame == null) {
                 delay(5)
                 continue
             }
-            val (data, pts) = pair
-            sendFrame(data, pts)
-        }
-    }
-
-    private fun sendFrame(data: ByteArray, pts: Long) {
-        val client = rtsp ?: return
-        runCatching {
-            client.request(
-                AirPlayConstants.RTSP_METHOD_POST,
-                AirPlayConstants.MIRROR_RTSP_PATH_STREAM,
-                headers = mapOf(
-                    "Content-Type" to AirPlayConstants.CONTENT_TYPE_BINARY,
-                    "X-Apple-PT" to pts.toString()
-                ),
-                body = data
-            )
-        }.onFailure {
-            Log.e(TAG, "Send frame failed", it)
+            sendFrame(frame)
         }
     }
 
     /**
-     * 构建 AirPlay 镜像 /info plist
+     * 发送一帧镜像数据
      *
-     * 包含设备能力声明: 视频参数、音频参数、加密能力
+     * AirPlay 镜像 POST /stream 格式:
+     *  HTTP body = [4 字节大端时间戳] + [NAL 数据 (Annex B)]
+     *
+     * 注意: AirPlay 2 设备的 NAL 数据需 FairPlay 加密，
+     *      本实现发送明文，仅对开源接收端 (UxPlay 等) 工作
      */
-    private fun buildInfoPlist(width: Int, height: Int): String {
-        return """<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>width</key>
-    <integer>$width</integer>
-    <key>height</key>
-    <integer>$height</integer>
-    <key>fps</key>
-    <integer>30</integer>
-    <key>overscanned</key>
-    <false/>
-    <key>version</key>
-    <string>${AirPlayConstants.USER_AGENT}</string>
-    <key>deviceClass</key>
-    <string>iPhone</string>
-    <key>macAddress</key>
-    <string>aa:bb:cc:dd:ee:ff</string>
-    <key>model</key>
-    <string>Android-MIUI</string>
-    <key>sourceVersion</key>
-    <string>460.21</string>
-    <key>features</key>
-    <integer>0x7</integer>
-</dict>
-</plist>
-"""
+    private fun sendFrame(frame: MirrorFrame) {
+        val client = rtsp ?: return
+        runCatching {
+            // 拼接 4 字节时间戳前缀 (90kHz 时钟) + NAL 数据
+            val payload = ByteArray(4 + frame.data.size)
+            ByteBuffer.wrap(payload, 0, 4).putInt(frame.pts90k)
+            System.arraycopy(frame.data, 0, payload, 4, frame.data.size)
+
+            client.sendBinaryFrame(
+                AirPlayConstants.MIRROR_RTSP_PATH_STREAM,
+                payload,
+                extraHeaders = mapOf(
+                    "X-Apple-PT" to frame.pts90k.toString()
+                )
+            )
+        }.onFailure {
+            Log.e(TAG, "Send frame failed: ${it.message}")
+        }
     }
+
+    private data class MirrorFrame(
+        val data: ByteArray,
+        val isKeyFrame: Boolean,
+        val pts90k: Int
+    )
 }
 
 sealed class MirrorState {
