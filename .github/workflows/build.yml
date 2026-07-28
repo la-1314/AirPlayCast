@@ -62,8 +62,14 @@ jobs:
       - name: Show Build Errors
         if: failure()
         run: |
-          echo "=== Last 200 lines of build output ==="
-          tail -200 /tmp/build.log || true
+          echo "=== Kotlin compile errors (e:) ==="
+          grep -n "^e: " /tmp/build.log || echo "(no e: lines found)"
+          echo ""
+          echo "=== Kotlin warnings (w:) first 30 ==="
+          grep -n "^w: " /tmp/build.log | head -30 || echo "(no w: lines found)"
+          echo ""
+          echo "=== Last 100 lines of build output ==="
+          tail -100 /tmp/build.log || true
 
       - name: Report Build Errors as Issue
         if: failure()
@@ -75,8 +81,14 @@ jobs:
           {
             echo "## 构建失败日志 (commit ${COMMIT_SHA})"
             echo ""
+            echo "### Kotlin 编译错误"
             echo '```'
-            tail -200 /tmp/build.log 2>/dev/null || echo "no log"
+            grep -n "^e: " /tmp/build.log 2>/dev/null || echo "(无 e: 错误行，可能是依赖/插件问题)"
+            echo '```'
+            echo ""
+            echo "### 末尾日志"
+            echo '```'
+            tail -100 /tmp/build.log 2>/dev/null || echo "no log"
             echo '```'
             echo ""
             echo "---"
@@ -92,10 +104,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 将构建日志提交到仓库，便于离线读取
+          # 将构建日志 (含 e: 错误行) 提交到仓库，便于离线读取
           COMMIT_SHA=$(git rev-parse --short HEAD)
           mkdir -p build-logs
-          tail -300 /tmp/build.log > "build-logs/failure-${COMMIT_SHA}.log" 2>/dev/null || echo "no log" > "build-logs/failure-${COMMIT_SHA}.log"
+          {
+            echo "=== Kotlin compile errors (e:) ==="
+            grep -n "^e: " /tmp/build.log 2>/dev/null || echo "(no e: lines)"
+            echo ""
+            echo "=== Last 300 lines ==="
+            tail -300 /tmp/build.log 2>/dev/null || echo "no log"
+          } > "build-logs/failure-${COMMIT_SHA}.log"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "build-logs/failure-${COMMIT_SHA}.log"

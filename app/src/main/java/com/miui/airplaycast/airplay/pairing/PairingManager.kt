@@ -273,7 +273,7 @@ class PairingManager(
         val nonce12 = ByteArray(4) + nonce8
         cipher.init(true, ParametersWithIV(KeyParameter(key), nonce12))
         val output = ByteArray(plaintext.size + 16)  // +16 for Poly1305 tag
-        val len = cipher.process(plaintext, 0, plaintext.size, output, 0)
+        val len = cipher.processBytes(plaintext, 0, plaintext.size, output, 0)
         cipher.doFinal(output, len)
         return output
     }
@@ -285,7 +285,7 @@ class PairingManager(
             val nonce12 = ByteArray(4) + nonce8
             cipher.init(false, ParametersWithIV(KeyParameter(key), nonce12))
             val output = ByteArray(ciphertext.size)
-            val len = cipher.process(ciphertext, 0, ciphertext.size, output, 0)
+            val len = cipher.processBytes(ciphertext, 0, ciphertext.size, output, 0)
             cipher.doFinal(output, len)
             output.copyOf(len)
         } catch (e: Exception) {
