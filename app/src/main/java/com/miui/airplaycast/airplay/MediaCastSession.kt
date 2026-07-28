@@ -8,17 +8,6 @@ import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * AirPlay 媒体投放会话
- *
- * 支持:
- *  - HTTP URL 投放 (远程视频 URL)
- *  - 本地媒体文件投放 (需先启动本地 HTTP 服务)
- *  - 播放控制: 播放/暂停/停止/跳转/音量
- *
- * 完整流程:
- *  1. GET /server-info 探测设备能力 (是否需要配对)
- *  2. POST /reverse 建立反向通道
- *  3. POST /play 投放媒体
- *  4. /rate /stop /scrub /volume 控制
  */
 class MediaCastSession(
     private val device: AirPlayDevice
@@ -38,28 +27,15 @@ class MediaCastSession(
     private val _volume = MutableStateFlow(1.0f)
     val volume: StateFlow<Float> = _volume.asStateFlow()
 
-    /** 最近一次错误详情 (供 UI 展示) */
     private val _lastError = MutableStateFlow<AirPlayError?>(null)
     val lastError: StateFlow<AirPlayError?> = _lastError.asStateFlow()
 
-    /** 设备能力 (server-info 探测后填充) */
     private val _serverInfo = MutableStateFlow<ServerInfo?>(null)
     val serverInfo: StateFlow<ServerInfo?> = _serverInfo.asStateFlow()
 
     val deviceName: String get() = device.name
     val deviceAddress: String get() = device.address
 
-    /**
-     * 投放一个媒体 URL
-     *
-     * 流程: server-info -> (PIN 配对探测, 带重试) -> /reverse -> /play
-     *
-     * @param url 媒体 URL
-     * @param startPosition 起始位置 (秒)
-     * @param onPinRequired 当设备要求 PIN 配对时回调 (suspend 等待用户输入)
-     *                      参数 errorHint: 重试时的错误提示 (首次为 null)
-     *                      返回 null 表示取消
-     */
     suspend fun playUrl(
         url: String,
         startPosition: Double = 0.0,
@@ -68,7 +44,6 @@ class MediaCastSession(
         _state.value = MediaCastState.Connecting
         _lastError.value = null
 
-        // 1. 探测设备能力
         when (val infoResult = client.serverInfo()) {
             is AirPlayResult.Success -> {
                 _serverInfo.value = infoResult.value
@@ -83,9 +58,7 @@ class MediaCastSession(
             }
         }
 
-        // 1.5 探测 PIN 配对需求 (带重试，最多 3 次)
-        //     注意: 不能用 runCatching{} 包裹，因为其 lambda 是非 suspend，
-        //     而 onPinRequired.invoke() 是 suspend 调用
+        // PIN 配对探测 (带重试，最多 3 次)
         if (onPinRequired != null) {
             val pairing = com.miui.airplaycast.airplay.pairing.PairingManager(device)
             when (val probe = pairing.isPinRequired()) {
@@ -116,7 +89,6 @@ class MediaCastSession(
                                         return false
                                     }
                                     Log.w(TAG, "PIN pairing attempt $attempts failed: ${pairResult.error.displayText}, retrying...")
-                                    // 循环回到 while 重新请求 PIN
                                 }
                             }
                         }
@@ -126,7 +98,6 @@ class MediaCastSession(
             }
         }
 
-        // 2. 启动反向通道 (失败不阻断，部分接收端不需要)
         when (val revResult = client.startReverseChannel()) {
             is AirPlayResult.Failure -> {
                 Log.w(TAG, "Reverse channel 启动失败 (非致命): ${revResult.error.displayText}")
@@ -134,7 +105,6 @@ class MediaCastSession(
             is AirPlayResult.Success -> Log.i(TAG, "Reverse channel started")
         }
 
-        // 3. 投放媒体
         return when (val playResult = client.play(url, startPosition)) {
             is AirPlayResult.Success -> {
                 _state.value = MediaCastState.Playing
@@ -151,16 +121,16 @@ class MediaCastSession(
     }
 
     fun resume(): Boolean {
-        return when (client.resume()) {
+        return when (val r = client.resume()) {
             is AirPlayResult.Success -> { _state.value = MediaCastState.Playing; true }
-            is AirPlayResult.Failure -> { _lastError.value = it.error; false }
+            is AirPlayResult.Failure -> { _lastError.value = r.error; false }
         }
     }
 
     fun pause(): Boolean {
-        return when (client.pause()) {
+        return when (val r = client.pause()) {
             is AirPlayResult.Success -> { _state.value = MediaCastState.Paused; true }
-            is AirPlayResult.Failure -> { _lastError.value = it.error; false }
+            is AirPlayResult.Failure -> { _lastError.value = r.error; false }
         }
     }
 
@@ -172,23 +142,20 @@ class MediaCastSession(
     }
 
     fun seekTo(seconds: Double): Boolean {
-        return when (client.scrub(seconds)) {
+        return when (val r = client.scrub(seconds)) {
             is AirPlayResult.Success -> { updateProgress(); true }
-            is AirPlayResult.Failure -> { _lastError.value = it.error; false }
+            is AirPlayResult.Failure -> { _lastError.value = r.error; false }
         }
     }
 
     fun setVolume(v: Float): Boolean {
         val clamped = v.coerceIn(0f, 1f)
-        return when (client.setVolume(clamped)) {
+        return when (val r = client.setVolume(clamped)) {
             is AirPlayResult.Success -> { _volume.value = clamped; true }
-            is AirPlayResult.Failure -> { _lastError.value = it.error; false }
+            is AirPlayResult.Failure -> { _lastError.value = r.error; false }
         }
     }
 
-    /**
-     * 拉取最新播放进度
-     */
     fun updateProgress() {
         if (_state.value !is MediaCastState.Playing) return
         when (val r = client.queryScrub()) {

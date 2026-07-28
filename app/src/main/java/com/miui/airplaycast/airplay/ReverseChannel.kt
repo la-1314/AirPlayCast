@@ -17,20 +17,6 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
-/**
- * AirPlay /reverse 反向通道
- *
- * AirPlay 协议要求客户端在控制会话开始时 POST /reverse 建立长连接，
- * 服务端通过该连接反向推送事件 (playback 状态变化、volume 变化等)。
- *
- * 实现机制:
- *  - POST /reverse 携带 X-Apple-Purpose: event 的请求体
- *  - 服务端不返回响应体，连接保持打开
- *  - 服务端通过同一连接 (TCP 流) 反向发送事件
- *
- * 注意: OkHttp 默认会等待响应完成，需用长连接读取
- * 这里使用独立线程读取反向事件流
- */
 class ReverseChannel(
     private val device: AirPlayDevice,
     private val sessionId: String,
@@ -43,7 +29,7 @@ class ReverseChannel(
 
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.SECONDS)  // 长连接不超时
+        .readTimeout(0, TimeUnit.SECONDS)
         .build()
 
     private val _events = MutableSharedFlow<ReverseEvent>(extraBufferCapacity = 64)
@@ -52,11 +38,6 @@ class ReverseChannel(
     private var scope: CoroutineScope? = null
     @Volatile private var running = false
 
-    /**
-     * 启动反向通道
-     *
-     * @return 成功建立连接 (HTTP 200)
-     */
     fun start(): Boolean {
         if (running) return true
         running = true
@@ -73,12 +54,6 @@ class ReverseChannel(
         Log.i(TAG, "Reverse channel stopped")
     }
 
-    /**
-     * 长连接监听反向事件
-     *
-     * 实际 AirPlay 反向通道是 HTTP/1.1 长连接，
-     * 服务端会在该连接上持续发送事件 (类似 server-sent events)
-     */
     private suspend fun listenLoop() {
         while (running && scope?.isActive == true) {
             try {
@@ -101,8 +76,10 @@ class ReverseChannel(
                     continue
                 }
 
-                // 服务端保持连接打开，从流中读取事件
-                val source = response.body?.source() ?: run {
+                // 不能用 `?: run { ...; continue }`，因 continue 跨 inline lambda
+                // 边界属于实验特性，改用 if-null 显式处理
+                val source = response.body?.source()
+                if (source == null) {
                     response.close()
                     kotlinx.coroutines.delay(2000)
                     continue
@@ -122,11 +99,6 @@ class ReverseChannel(
         }
     }
 
-    /**
-     * 解析反向事件行
-     *
-     * 事件格式: "event: <name>\r\n<parameter lines>\r\n"
-     */
     private fun parseEvent(line: String): ReverseEvent? {
         if (!line.startsWith("event:")) return null
         val name = line.removePrefix("event:").trim()
