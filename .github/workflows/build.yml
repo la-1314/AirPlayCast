@@ -32,10 +32,21 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Generate Gradle Wrapper
+      - name: Ensure Gradle Wrapper
         run: |
+          # Download gradle-wrapper.jar if missing (binary file not committed to repo)
           if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
-            gradle wrapper --gradle-version 8.9
+            echo "Downloading gradle-wrapper.jar from Gradle 8.9 release..."
+            curl -fsSL -o gradle/wrapper/gradle-wrapper.jar \
+              "https://raw.githubusercontent.com/gradle/gradle/v8.9.0/gradle/wrapper/gradle-wrapper.jar"
+          fi
+          # Download gradlew if the committed one is the simplified placeholder
+          if ! grep -q "org.gradle.appname" gradlew 2>/dev/null; then
+            echo "Downloading full gradlew script from Gradle 8.9 release..."
+            curl -fsSL -o gradlew \
+              "https://raw.githubusercontent.com/gradle/gradle/v8.9.0/gradlew"
+            curl -fsSL -o gradlew.bat \
+              "https://raw.githubusercontent.com/gradle/gradle/v8.9.0/gradlew.bat"
           fi
           chmod +x ./gradlew
 
