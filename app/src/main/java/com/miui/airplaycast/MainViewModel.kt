@@ -14,9 +14,9 @@ import com.miui.airplaycast.capture.ScreenCaptureManager
 import com.miui.airplaycast.capture.ScreenCaptureService
 import com.miui.airplaycast.discovery.AirPlayDevice
 import com.miui.airplaycast.discovery.DiscoveryViewModel
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.resume
 
 /**
  * 主界面 ViewModel - 协调设备发现 / 媒体投放 / 屏幕镜像
@@ -68,29 +68,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private var localServer: LocalMediaServer? = null
 
-    /** 待执行的 PIN 配对回调 (UI 输入 PIN 后调用) */
-    @Volatile private var pendingPinAction: ((String) -> Unit)? = null
-
     /**
-     * 由 MirroringSession/MediaCastSession 在收到 401/403 时触发
-     * UI 监听 pinRequest 弹出输入框，用户输入后调用 [submitPin]
+     * 待完成的 PIN 输入 Deferred
+     *
+     * 用 CompletableDeferred 替代回调，确保 cancelPin 也能恢复挂起的协程，
+     * 避免 [awaitPinFromUi] 永久挂起导致死锁
      */
-    fun requestPin(deviceName: String, onPin: (String) -> Unit) {
-        pendingPinAction = onPin
-        _pinRequest.value = PinRequest(deviceName)
-    }
+    @Volatile private var pendingPinDeferred: CompletableDeferred<String?>? = null
 
     /** UI 提交 PIN 码给上层的握手流程 */
     fun submitPin(pin: String) {
         _pinRequest.value = null
-        pendingPinAction?.invoke(pin)
-        pendingPinAction = null
+        pendingPinDeferred?.complete(pin)
+        pendingPinDeferred = null
     }
 
     /** 用户取消 PIN 输入 */
     fun cancelPin() {
         _pinRequest.value = null
-        pendingPinAction = null
+        // 用 null 恢复挂起的 awaitPinFromUi，避免协程死锁
+        pendingPinDeferred?.complete(null)
+        pendingPinDeferred = null
         viewModelScope.launch { _toast.emit("已取消配对") }
     }
 
@@ -124,9 +122,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
             // 1. RTSP 握手 (含 PIN 配对探测 + /info + SETUP + RECORD)
             //    onPinRequired 回调在 IO 线程被调用，需挂起等待用户输入
+            //    errorHint 参数用于重试时在 UI 显示 "PIN 错误，请重试"
             val result = MirroringSession.start(
                 device, 1920, 1080, getApplication(),
-                onPinRequired = { awaitPinFromUi(device.name) }
+                onPinRequired = { errorHint -> awaitPinFromUi(device.name, errorHint) }
             )
             when (result) {
                 is com.miui.airplaycast.airplay.AirPlayResult.Success -> {
@@ -146,22 +145,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * 挂起等待 UI 输入 PIN 码
      *
      * 通过 [pinRequest] StateFlow 触发 UI 弹框，
-     * 用户输入后调用 [submitPin] 唤醒本挂起函数
+     * 用户输入后调用 [submitPin] 或 [cancelPin] 唤醒本挂起函数
+     *
+     * @param deviceName 目标设备名 (UI 显示用)
+     * @param errorHint 重试时的错误提示 (首次为 null，重试时为 "PIN 错误，请重试" 等)
+     * @return 用户输入的 PIN 码，null 表示用户取消
      */
-    private suspend fun awaitPinFromUi(deviceName: String): String? {
-        return kotlinx.coroutines.suspendCancellableCoroutine { cont ->
-            requestPin(deviceName) { pin ->
-                if (cont.isActive) {
-                    if (pin.isBlank()) cont.resume(null)
-                    else cont.resume(pin)
-                }
-            }
-            cont.invokeOnCancellation {
-                // 协程取消时清理回调
-                pendingPinAction = null
-                _pinRequest.value = null
-            }
-        }
+    private suspend fun awaitPinFromUi(deviceName: String, errorHint: String? = null): String? {
+        val deferred = CompletableDeferred<String?>()
+        pendingPinDeferred = deferred
+        _pinRequest.value = PinRequest(deviceName, errorHint = errorHint)
+        return deferred.await()
     }
 
     fun stopMirroring() {
@@ -198,7 +192,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
             val session = MediaCastSession(device)
             _mediaSession.value = session
-            val ok = session.playUrl(url)
+            val ok = session.playUrl(url) { errorHint -> awaitPinFromUi(device.name, errorHint) }
             if (!ok) {
                 _lastError.value = session.lastError.value
                 _toast.emit("投放失败: ${session.lastError.value?.displayText ?: "未知错误"}")
@@ -221,7 +215,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _lastError.value = null
             _toast.emit("开始投放到 ${device.name}")
-            val ok = session.playUrl(url)
+            val ok = session.playUrl(url) { errorHint -> awaitPinFromUi(device.name, errorHint) }
             if (!ok) {
                 _lastError.value = session.lastError.value
                 _toast.emit("投放失败: ${session.lastError.value?.displayText ?: "未知错误"}")
@@ -247,32 +241,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * 获取本机局域网 IP - 优先 WiFi 网卡
-     *
-     * 修复点:
-     *  - 优先选择 wlan 开头的网卡 (避免 VPN/虚拟网卡)
-     *  - 排除 loopback / link-local / 未启用网卡
-     *  - 返回前做连通性自检 (本机 Socket bind 测试)
      */
     private fun getLocalIp(): String? {
         return runCatching {
-            val candidates = mutableListOf<Pair<String, String>>()  // (ifaceName, ip)
+            val candidates = mutableListOf<Pair<String, String>>()
             val interfaces = java.net.NetworkInterface.getNetworkInterfaces() ?: return null
             for (intf in interfaces) {
                 if (!intf.isUp || intf.isLoopback || intf.isVirtual) continue
                 val name = intf.name.lowercase()
                 for (addr in intf.inetAddresses) {
                     if (addr.isLoopbackAddress) continue
-                    if (addr is java.net.Inet6Address) continue  // 优先 IPv4
+                    if (addr is java.net.Inet6Address) continue
                     if (addr.isLinkLocalAddress) continue
                     candidates.add(name to addr.hostAddress)
                 }
             }
-            // 优先级: wlan* > eth* > 其他
             candidates.sortedBy { (name, _) ->
                 when {
                     name.startsWith("wlan") -> 0
                     name.startsWith("eth") -> 1
-                    name.startsWith("ap") -> 2  // 热点
+                    name.startsWith("ap") -> 2
                     else -> 3
                 }
             }.firstOrNull()?.second
@@ -289,5 +277,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 /** PIN 配对请求信息 (供 UI 弹框显示) */
 data class PinRequest(
     val deviceName: String,
-    val hint: String = "请在接收端屏幕查看 PIN 码"
+    val hint: String = "请在接收端屏幕查看 PIN 码",
+    /** 重试时的错误提示 (首次为 null) */
+    val errorHint: String? = null
 )

@@ -76,6 +76,28 @@ inline fun <T> airPlayTry(block: () -> T): AirPlayResult<T> = try {
 }
 
 /**
+ * airPlayTry 的 suspend 版本
+ *
+ * 用于需要在内联块中调用 suspend 函数的场景 (如 PIN 配对回调 onPinRequired)
+ * 普通 [airPlayTry] 的 block 是非 suspend lambda，无法在其中调用 suspend 函数
+ */
+suspend inline fun <T> airPlayTrySuspend(crossinline block: suspend () -> T): AirPlayResult<T> = try {
+    AirPlayResult.Success(block())
+} catch (e: java.net.ConnectException) {
+    AirPlayResult.Failure(AirPlayError.Network("连接被拒 - ${e.message}", e))
+} catch (e: java.net.SocketTimeoutException) {
+    AirPlayResult.Failure(AirPlayError.Network("连接超时 - ${e.message}", e))
+} catch (e: java.net.UnknownHostException) {
+    AirPlayResult.Failure(AirPlayError.Network("无法解析主机 - ${e.message}", e))
+} catch (e: javax.net.ssl.SSLException) {
+    AirPlayResult.Failure(AirPlayError.Network("SSL 错误 - ${e.message}", e))
+} catch (e: AirPlayException) {
+    AirPlayResult.Failure(e.error)
+} catch (e: Throwable) {
+    AirPlayResult.Failure(AirPlayError.Unknown(e.message ?: e.javaClass.simpleName, e))
+}
+
+/**
  * 可抛出的 AirPlay 异常，便于在协议层向上传递错误
  */
 class AirPlayException(val error: AirPlayError) : RuntimeException(error.message)
