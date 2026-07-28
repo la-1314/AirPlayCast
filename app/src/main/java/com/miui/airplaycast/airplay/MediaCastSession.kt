@@ -13,12 +13,6 @@ import kotlinx.coroutines.flow.asStateFlow
  *  - HTTP URL 投放 (远程视频 URL)
  *  - 本地媒体文件投放 (需先启动本地 HTTP 服务)
  *  - 播放控制: 播放/暂停/停止/跳转/音量
- *
- * 完整流程:
- *  1. GET /server-info 探测设备能力 (是否需要配对)
- *  2. POST /reverse 建立反向通道
- *  3. POST /play 投放媒体
- *  4. /rate /stop /scrub /volume 控制
  */
 class MediaCastSession(
     private val device: AirPlayDevice
@@ -52,9 +46,19 @@ class MediaCastSession(
     /**
      * 投放一个媒体 URL
      *
-     * 流程: server-info -> /reverse -> /play
+     * 流程: server-info -> (PIN 配对探测, 带重试) -> /reverse -> /play
+     *
+     * @param url 媒体 URL
+     * @param startPosition 起始位置 (秒)
+     * @param onPinRequired 当设备要求 PIN 配对时回调 (suspend 等待用户输入)
+     *                      参数 errorHint: 重试时的错误提示 (首次为 null)
+     *                      返回 null 表示取消
      */
-    fun playUrl(url: String, startPosition: Double = 0.0): Boolean {
+    suspend fun playUrl(
+        url: String,
+        startPosition: Double = 0.0,
+        onPinRequired: (suspend (errorHint: String?) -> String?)? = null
+    ): Boolean {
         _state.value = MediaCastState.Connecting
         _lastError.value = null
 
@@ -64,14 +68,54 @@ class MediaCastSession(
                 _serverInfo.value = infoResult.value
                 val si = infoResult.value
                 Log.i(TAG, "Server: ${si.model}, featuresLow=0x${si.featuresLow.toString(16)}, featuresHigh=0x${si.featuresHigh.toString(16)}, video=${si.supportsVideo}")
-                // 不再基于 features 预判强制配对，真正的配对要求由 401/403 响应触发
                 if (!si.supportsVideo) {
                     Log.w(TAG, "Device may not support video casting, continuing anyway")
                 }
             }
             is AirPlayResult.Failure -> {
                 Log.w(TAG, "server-info 探测失败，继续尝试: ${infoResult.error.displayText}")
-                // 不阻断流程，部分开源接收端 /server-info 可能不完整
+            }
+        }
+
+        // 1.5 探测 PIN 配对需求 (带重试，最多 3 次)
+        //     注意: 不能用 runCatching{} 包裹，因为其 lambda 是非 suspend，
+        //     而 onPinRequired.invoke() 是 suspend 调用
+        if (onPinRequired != null) {
+            val pairing = com.miui.airplaycast.airplay.pairing.PairingManager(device)
+            when (val probe = pairing.isPinRequired()) {
+                is AirPlayResult.Success -> {
+                    if (probe.value) {
+                        Log.i(TAG, "Device requires PIN pairing, requesting user input")
+                        var attempts = 0
+                        val maxAttempts = 3
+                        while (attempts < maxAttempts) {
+                            val errorHint = if (attempts > 0) "PIN 错误，请重试 ($attempts/$maxAttempts)" else null
+                            val pin = onPinRequired.invoke(errorHint)
+                            if (pin.isNullOrBlank()) {
+                                val err = AirPlayError.PairingRequired("用户取消 PIN 输入")
+                                _lastError.value = err
+                                _state.value = MediaCastState.Error(err.displayText)
+                                return false
+                            }
+                            when (val pairResult = pairing.pairSetupWithPin(pin)) {
+                                is AirPlayResult.Success -> {
+                                    Log.i(TAG, "PIN pairing succeeded")
+                                    break
+                                }
+                                is AirPlayResult.Failure -> {
+                                    attempts++
+                                    if (attempts >= maxAttempts) {
+                                        _lastError.value = pairResult.error
+                                        _state.value = MediaCastState.Error(pairResult.error.displayText)
+                                        return false
+                                    }
+                                    Log.w(TAG, "PIN pairing attempt $attempts failed: ${pairResult.error.displayText}, retrying...")
+                                }
+                            }
+                        }
+                    }
+                }
+                is AirPlayResult.Failure -> Log.w(TAG, "PIN probe failed (non-fatal): ${probe.error.displayText}")
             }
         }
 
@@ -135,9 +179,6 @@ class MediaCastSession(
         }
     }
 
-    /**
-     * 拉取最新播放进度
-     */
     fun updateProgress() {
         if (_state.value !is MediaCastState.Playing) return
         when (val r = client.queryScrub()) {

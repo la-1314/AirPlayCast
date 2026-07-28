@@ -21,13 +21,6 @@ import java.util.concurrent.ConcurrentLinkedQueue
  *  5. RECORD (使用服务端 Session ID)
  *  6. POST /stream 持续推送 H.264 NAL 帧 (带 4 字节时间戳前缀)
  *  7. TEARDOWN 关闭会话
- *
- * 重要修复:
- *  - 端口: device.port (7000) -> MIRROR_DEFAULT_PORT (7100)
- *  - SETUP: 携带 plist 请求体
- *  - RECORD: 使用 SETUP 响应返回的 serverSessionId
- *  - plist: 真实 MAC + features 字符串 + pi/vm/deviceID
- *  - 启动顺序: 先启动编码器产出关键帧，再发 RECORD (由调用方协调)
  */
 object MirroringSession {
     private const val TAG = "MirroringSession"
@@ -45,34 +38,24 @@ object MirroringSession {
 
     /**
      * 启动镜像会话 (仅握手，不包含编码器启动)
-     *
-     * 调用方应:
-     *  1. 先调用 [start] 完成 RTSP 握手
-     *  2. 再启动 [com.miui.airplaycast.capture.ScreenCaptureManager] 产出关键帧
-     *  3. 通过 [enqueueFrame] 推送编码后的 NAL
-     *
-     * @param device AirPlay 接收端
-     * @param width  视频宽 (横屏)
-     * @param height 视频高
-     * @param context 用于获取 MAC 地址
-     * @return AirPlayResult<Unit>
      */
-    fun start(device: AirPlayDevice, width: Int, height: Int, context: Context): AirPlayResult<Unit> =
+    suspend fun start(device: AirPlayDevice, width: Int, height: Int, context: Context): AirPlayResult<Unit> =
         start(device, width, height, context, onPinRequired = null)
 
     /**
      * 启动镜像会话 (带 PIN 配对回调)
      *
-     * @param onPinRequired 当探测到设备要求 PIN 时调用 (在 IO 线程，回调内应阻塞等待用户输入)
-     *                     回调返回用户输入的 PIN 码，返回 null 表示用户取消
+     * @param onPinRequired 当探测到设备要求 PIN 时调用 (suspend，回调内阻塞等待用户输入)
+     *                      参数 errorHint: 重试时的错误提示 (首次为 null)
+     *                      返回用户输入的 PIN 码，返回 null 表示用户取消
      */
-    fun start(
+    suspend fun start(
         device: AirPlayDevice,
         width: Int,
         height: Int,
         context: Context,
-        onPinRequired: (suspend () -> String?)?
-    ): AirPlayResult<Unit> = airPlayTry {
+        onPinRequired: (suspend (errorHint: String?) -> String?)?
+    ): AirPlayResult<Unit> = airPlayTrySuspend {
         if (_state.value is MirrorState.Running) {
             throw AirPlayException(AirPlayError.Unknown("镜像已在运行"))
         }
@@ -101,53 +84,55 @@ object MirroringSession {
         } else if (infoResult is AirPlayResult.Success) {
             val si = infoResult.value
             Log.i(TAG, "Server: model=${si.model}, featuresLow=0x${si.featuresLow.toString(16)}, featuresHigh=0x${si.featuresHigh.toString(16)}, mirror=${si.supportsMirroring}, auth=${si.requiresAuthentication}, airplay2=${si.isAirPlay2}")
-            // 不再基于 features 预判强制配对:
-            //   0x80 (FEATURE_AUTHENTICATION) 表示"支持认证"，开源接收端 (UxPlay) 几乎都置位但不一定强制 PIN
-            //   真正的强制配对由握手时返回 401/403 触发，由 PairingManager 处理
             if (!si.supportsMirroring && !device.supportsMirroring) {
                 Log.w(TAG, "Device may not support mirroring, continuing anyway")
             }
-            // TODO: 当 server-info 返回明确的镜像端口字段时，覆盖 mirrorPort (P1-4)
         }
 
-        // 1.5 探测 PIN 配对需求
-        //     提前探测避免握手时才返回 401，改善用户体验
+        // 1.5 探测 PIN 配对需求 (带重试，最多 3 次)
+        //     注意: 不能用 runCatching{} 包裹，因为其 lambda 是非 suspend，
+        //     而 onPinRequired.invoke() 是 suspend 调用
         if (onPinRequired != null) {
-            runCatching {
-                val pairing = com.miui.airplaycast.airplay.pairing.PairingManager(device)
-                when (val probe = pairing.isPinRequired()) {
-                    is AirPlayResult.Success -> {
-                        if (probe.value) {
-                            Log.i(TAG, "Device requires PIN pairing, requesting user input")
-                            val pin = onPinRequired.invoke()
+            val pairing = com.miui.airplaycast.airplay.pairing.PairingManager(device)
+            when (val probe = pairing.isPinRequired()) {
+                is AirPlayResult.Success -> {
+                    if (probe.value) {
+                        Log.i(TAG, "Device requires PIN pairing, requesting user input")
+                        var attempts = 0
+                        val maxAttempts = 3
+                        while (attempts < maxAttempts) {
+                            val errorHint = if (attempts > 0) "PIN 错误，请重试 ($attempts/$maxAttempts)" else null
+                            val pin = onPinRequired.invoke(errorHint)
                             if (pin.isNullOrBlank()) {
                                 throw AirPlayException(AirPlayError.PairingRequired("用户取消 PIN 输入"))
                             }
                             when (val pairResult = pairing.pairSetupWithPin(pin)) {
-                                is AirPlayResult.Success -> Log.i(TAG, "PIN pairing succeeded, continuing handshake")
-                                is AirPlayResult.Failure -> throw AirPlayException(pairResult.error)
+                                is AirPlayResult.Success -> {
+                                    Log.i(TAG, "PIN pairing succeeded, continuing handshake")
+                                    break
+                                }
+                                is AirPlayResult.Failure -> {
+                                    attempts++
+                                    if (attempts >= maxAttempts) {
+                                        throw AirPlayException(pairResult.error)
+                                    }
+                                    Log.w(TAG, "PIN pairing attempt $attempts failed: ${pairResult.error.displayText}, retrying...")
+                                }
                             }
-                        } else {
-                            Log.i(TAG, "Device does not require PIN")
                         }
-                    }
-                    is AirPlayResult.Failure -> {
-                        Log.w(TAG, "PIN probe failed (non-fatal): ${probe.error.displayText}")
-                        // 探测失败不阻断，握手时若需要配对会再次返回 401
+                    } else {
+                        Log.i(TAG, "Device does not require PIN")
                     }
                 }
-            }.onFailure {
-                Log.w(TAG, "PIN pairing flow error: ${it.message}")
-                // 若是用户取消或明确配对错误，向上抛出
-                if (it is AirPlayException) throw it
+                is AirPlayResult.Failure -> {
+                    Log.w(TAG, "PIN probe failed (non-fatal): ${probe.error.displayText}")
+                }
             }
         }
 
-        // 2. 连接 RTSP 镜像端口 (默认 7100，可被 server-info 覆盖)
-        //    注意: 实际 AirPlay 镜像端口可由 /server-info 返回的字段或 mDNS TXT 推断，
-        //    大多数接收端 (含 UxPlay) 固定使用 7100
+        // 2. 连接 RTSP 镜像端口 (默认 7100)
         val client = RtspClient(hostAddress, mirrorPort)
-        client.connect()  // 失败会抛 AirPlayException
+        client.connect()
         rtsp = client
 
         // 3. POST /info (plist 含真实 MAC、deviceID、pi、vm)
@@ -174,8 +159,6 @@ object MirroringSession {
         Log.i(TAG, "/info OK")
 
         // 4. SETUP /stream (携带 plist 请求体 + 标准 RTSP Transport 头)
-        //    AirPlay 镜像使用单 RTP 流 (交错模式或 UDP)，Transport 头告诉服务端期望的传输模式
-        //    即使部分开源接收端不严格校验，补全头部可提升兼容性
         val setupPlist = PlistBuilder.buildSetupPlist(macAddress)
         val setupResp = client.request(
             AirPlayConstants.RTSP_METHOD_SETUP,
@@ -192,11 +175,9 @@ object MirroringSession {
                 "镜像流通道建立失败 - 设备可能要求 FairPlay 配对"
             ))
         }
-        // serverSessionId 已在 RtspClient.readResponse 中自动解析
         Log.i(TAG, "SETUP OK, server session=${client.serverSessionId}")
 
         // 5. RECORD (使用服务端返回的 Session + RTP-Info 头)
-        //    RTP-Info 声明初始 RTP 序列号与时间戳，部分严格 RTSP 实现要求 RECORD 必须携带
         val recordPlist = PlistBuilder.buildRecordPlist(width, height)
         val recordResp = client.request(
             AirPlayConstants.RTSP_METHOD_RECORD,
@@ -252,10 +233,6 @@ object MirroringSession {
      *
      * AirPlay 镜像帧格式:
      *  [4 字节大端时间戳 (90kHz 时钟)] + [H.264 NAL 数据 (Annex B 格式)]
-     *
-     * 时间戳单位: 90kHz 时钟 (即 1 秒 = 90000 单位)
-     *   presentationTimeUs (微秒) → 90kHz: pts = us * 90 / 1000
-     *   早期实现误用毫秒导致服务端解码时序错乱、画面卡顿
      */
     fun enqueueFrame(nalData: ByteArray, isKeyFrame: Boolean, presentationTimeUs: Long) {
         if (_state.value !is MirrorState.Running) return
@@ -283,19 +260,9 @@ object MirroringSession {
         }
     }
 
-    /**
-     * 发送一帧镜像数据
-     *
-     * AirPlay 镜像 POST /stream 格式:
-     *  HTTP body = [4 字节大端时间戳] + [NAL 数据 (Annex B)]
-     *
-     * 注意: AirPlay 2 设备的 NAL 数据需 FairPlay 加密，
-     *      本实现发送明文，仅对开源接收端 (UxPlay 等) 工作
-     */
     private fun sendFrame(frame: MirrorFrame) {
         val client = rtsp ?: return
         runCatching {
-            // 拼接 4 字节时间戳前缀 (90kHz 时钟) + NAL 数据
             val payload = ByteArray(4 + frame.data.size)
             ByteBuffer.wrap(payload, 0, 4).putInt(frame.pts90k)
             System.arraycopy(frame.data, 0, payload, 4, frame.data.size)
