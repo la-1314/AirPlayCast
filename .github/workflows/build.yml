@@ -135,21 +135,26 @@ jobs:
         run: |
           set -e
           TAG="v1.0.0"
-          APK=$(ls app/build/outputs/apk/debug/*.apk 2>/dev/null | head -1)
-          if [ -z "$APK" ]; then
+          SRC_APK=$(ls app/build/outputs/apk/debug/*.apk 2>/dev/null | head -1)
+          if [ -z "$SRC_APK" ]; then
             echo "未找到 APK，跳过发布"
             exit 0
           fi
-          echo "APK: $APK"
+          echo "APK: $SRC_APK"
+          # 统一命名为带版本号的文件名，便于覆盖旧产物，避免多 apk 混留
+          ASSET_NAME="AirPlayCast-v1.0.0-debug.apk"
+          cp "$SRC_APK" "$ASSET_NAME"
           COMMIT_SHA=$(git rev-parse --short HEAD)
           # 已存在则覆盖产物，否则新建 Release
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG 已存在，覆盖上传 APK..."
-            gh release upload "$TAG" "$APK" --clobber
+            gh release upload "$TAG" "$ASSET_NAME" --clobber
             gh release edit "$TAG" --notes "AirPlay 投屏 App v1.0.0 (最新构建: ${COMMIT_SHA})" --target main
+            # 清理历史遗留的默认名产物 (app-debug.apk)
+            gh release delete-asset "$TAG" app-debug.apk 2>/dev/null || true
           else
             echo "创建 Release $TAG..."
-            gh release create "$TAG" "$APK" \
+            gh release create "$TAG" "$ASSET_NAME" \
               --title "AirPlayCast v1.0.0" \
               --notes "AirPlay 投屏 App v1.0.0 (构建: ${COMMIT_SHA})" \
               --target main
