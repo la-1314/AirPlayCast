@@ -128,6 +128,34 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+      - name: Publish GitHub Release
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          TAG="v1.0.0"
+          APK=$(ls app/build/outputs/apk/debug/*.apk 2>/dev/null | head -1)
+          if [ -z "$APK" ]; then
+            echo "未找到 APK，跳过发布"
+            exit 0
+          fi
+          echo "APK: $APK"
+          COMMIT_SHA=$(git rev-parse --short HEAD)
+          # 已存在则覆盖产物，否则新建 Release
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，覆盖上传 APK..."
+            gh release upload "$TAG" "$APK" --clobber
+            gh release edit "$TAG" --notes "AirPlay 投屏 App v1.0.0 (最新构建: ${COMMIT_SHA})" --target main
+          else
+            echo "创建 Release $TAG..."
+            gh release create "$TAG" "$APK" \
+              --title "AirPlayCast v1.0.0" \
+              --notes "AirPlay 投屏 App v1.0.0 (构建: ${COMMIT_SHA})" \
+              --target main
+          fi
+          echo "Release 发布完成: https://github.com/${{ github.repository }}/releases/tag/$TAG"
+
       - name: Upload Build Reports
         if: always()
         uses: actions/upload-artifact@v4
