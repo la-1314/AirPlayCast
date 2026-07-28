@@ -51,7 +51,15 @@ jobs:
           chmod +x ./gradlew
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        run: |
+          ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee /tmp/build.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Show Build Errors
+        if: failure()
+        run: |
+          echo "=== Last 200 lines of build output ==="
+          tail -200 /tmp/build.log || true
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
