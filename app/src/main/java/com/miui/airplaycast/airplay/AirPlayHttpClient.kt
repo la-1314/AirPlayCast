@@ -12,21 +12,6 @@ import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
-/**
- * AirPlay HTTP 控制客户端
- *
- * 实现 AirPlay 1 控制协议:
- *  - /server-info  设备能力探测
- *  - /reverse      反向通道 (委托给 [ReverseChannel])
- *  - /play /rate /stop /scrub /volume /photo
- *
- * 关键头部:
- *  - X-Apple-Session-ID  会话追踪
- *  - DACP-ID             客户端唯一标识
- *  - Active-Remote       远程控制会话 ID
- *
- * 错误处理: 所有方法返回 [AirPlayResult]，保留异常堆栈便于 UI 定位
- */
 class AirPlayHttpClient(
     private val device: AirPlayDevice
 ) {
@@ -41,18 +26,12 @@ class AirPlayHttpClient(
         .retryOnConnectionFailure(true)
         .build()
 
-    /** X-Apple-Session-ID - 用于服务端追踪整个会话 */
     val sessionId: String = UUID.randomUUID().toString().uppercase()
-
-    /** DACP-ID - 客户端唯一标识，部分接收端必须 */
     val dacpId: String = UUID.randomUUID().toString().uppercase().substring(0, 16)
-
-    /** Active-Remote - 远程控制会话 ID */
     val activeRemote: String = (System.currentTimeMillis() and 0xFFFFFFFFL).toString(16).uppercase()
 
     private val baseUrl: String = "http://${'$'}{device.host.hostAddress}:${'$'}{device.port}"
 
-    /** 反向通道 (按需启动) */
     var reverseChannel: ReverseChannel? = null
         private set
 
@@ -211,8 +190,6 @@ class AirPlayHttpClient(
         }
     }
 
-    // ---------- 内部辅助 ----------
-
     private fun executeGet(path: String): Response? {
         val request = Request.Builder()
             .url("$baseUrl$path")
@@ -275,12 +252,6 @@ class AirPlayHttpClient(
         }
     }
 
-    /**
-     * 校验响应状态码，根据状态码生成对应的 [AirPlayError]
-     *
-     * 接受 nullable Response: 上游 executePostWithControlHeaders / postControl 返回 Response?，
-     * 网络异常已由 executeRequest 抛出，此处 null 视为服务端无响应
-     */
     private fun requireSuccess(resp: Response?, stage: String) {
         if (resp == null) {
             throw AirPlayException(AirPlayError.ServerError(0, "$stage 无响应"))
@@ -301,10 +272,9 @@ class AirPlayHttpClient(
 
     private fun parseServerInfo(raw: String): ServerInfo {
         val gson = Gson()
-        // Gson fromJson(raw, Map::class.java) 返回 Map<*, *>! 平台类型，
-        // 直接赋值给 Map<String, Any?> 会触发类型不匹配，需显式 unchecked cast
-        @Suppress("UNCHECKED_CAST")
-        val map: Map<String, Any?> = (gson.fromJson(raw, Map::class.java) ?: emptyMap()) as Map<String, Any?>
+        // 使用 TypeToken 保留泛型信息，避免 Map<*, *> 平台类型导致类型推断失败
+        val type = object : com.google.gson.reflect.TypeToken<Map<String, Any?>>() {}.type
+        val map: Map<String, Any?> = gson.fromJson(raw, type) ?: emptyMap()
         val featuresStr = (map["features"] as? String) ?: "0"
         val (featuresLow, featuresHigh) = parseFeatures128(featuresStr)
         return ServerInfo(
@@ -346,9 +316,6 @@ class AirPlayHttpClient(
     }
 }
 
-/**
- * /server-info 解析后的设备能力信息
- */
 data class ServerInfo(
     val deviceId: String?,
     val model: String?,
