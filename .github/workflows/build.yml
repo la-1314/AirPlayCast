@@ -19,6 +19,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # 拉取完整历史与 tags，用于在 Release 步骤生成 changelog (git describe / git log)
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -134,33 +137,42 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          TAG="v1.0.1"
+          # 从 build.gradle.kts 读取 versionName 作为 Release tag (每次发版必须 bump 版本号)
+          VERSION_NAME=$(grep 'versionName' app/build.gradle.kts | head -1 | sed -E 's/.*versionName = "([^"]+)".*/\1/')
+          if [ -z "$VERSION_NAME" ]; then
+            echo "无法从 build.gradle.kts 解析 versionName，跳过发布"
+            exit 0
+          fi
+          TAG="v${VERSION_NAME}"
+          echo "目标版本: $TAG"
+          # 强制每次发版使用新 tag：已存在则报错，提示 bump versionName
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::Release $TAG 已存在。请先在 app/build.gradle.kts 中 bump versionName (和 versionCode) 后重新推送 —— 每次发版必须使用新版本号，不再覆盖旧 Release。"
+            exit 1
+          fi
           SRC_APK=$(ls app/build/outputs/apk/debug/*.apk 2>/dev/null | head -1)
           if [ -z "$SRC_APK" ]; then
             echo "未找到 APK，跳过发布"
             exit 0
           fi
           echo "APK: $SRC_APK"
-          # 统一命名为带版本号的文件名，便于覆盖旧产物，避免多 apk 混留
-          ASSET_NAME="AirPlayCast-v1.0.1-debug.apk"
+          ASSET_NAME="AirPlayCast-${TAG}-debug.apk"
           cp "$SRC_APK" "$ASSET_NAME"
           COMMIT_SHA=$(git rev-parse --short HEAD)
-          # 用 printf 生成 notes，避免 shell 多行字符串在 YAML run 块中的转义歧义
-          NOTES=$(printf 'AirPlay 投屏 App v1.0.1 (构建: %s)\n\n## 修复\n- 修复 baseUrl 字符串模板转义错误 (Invalid URL port) 导致扫描到设备但无法连接的根本问题' "$COMMIT_SHA")
-          # 已存在则覆盖产物，否则新建 Release
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG 已存在，覆盖上传 APK..."
-            gh release upload "$TAG" "$ASSET_NAME" --clobber
-            gh release edit "$TAG" --notes "$NOTES" --target main
-            # 清理历史遗留的默认名产物 (app-debug.apk)
-            gh release delete-asset "$TAG" app-debug.apk 2>/dev/null || true
+          # 自动生成 notes：从上一个 tag 到当前的提交日志
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            CHANGELOG=$(git log --pretty=format:"- %s" "${PREV_TAG}..HEAD")
+            NOTES=$(printf 'AirPlay 投屏 App %s (构建: %s)\n\n## 自 %s 以来的变更\n%s' "$TAG" "$COMMIT_SHA" "$PREV_TAG" "$CHANGELOG")
           else
-            echo "创建 Release $TAG..."
-            gh release create "$TAG" "$ASSET_NAME" \
-              --title "AirPlayCast v1.0.1" \
-              --notes "$NOTES" \
-              --target main
+            CHANGELOG=$(git log --pretty=format:"- %s" -10)
+            NOTES=$(printf 'AirPlay 投屏 App %s (构建: %s)\n\n## 变更\n%s' "$TAG" "$COMMIT_SHA" "$CHANGELOG")
           fi
+          echo "创建 Release $TAG..."
+          gh release create "$TAG" "$ASSET_NAME" \
+            --title "AirPlayCast ${TAG}" \
+            --notes "$NOTES" \
+            --target main
           echo "Release 发布完成: https://github.com/${{ github.repository }}/releases/tag/$TAG"
 
       - name: Upload Build Reports
