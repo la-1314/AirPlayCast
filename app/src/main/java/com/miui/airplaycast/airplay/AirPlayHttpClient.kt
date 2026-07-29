@@ -30,7 +30,7 @@ class AirPlayHttpClient(
     val dacpId: String = UUID.randomUUID().toString().uppercase().substring(0, 16)
     val activeRemote: String = (System.currentTimeMillis() and 0xFFFFFFFFL).toString(16).uppercase()
 
-    private val baseUrl: String = "http://${'$'}{device.host.hostAddress}:${'$'}{device.port}"
+    private val baseUrl: String = "http://${device.host.hostAddress}:${device.port}"
 
     var reverseChannel: ReverseChannel? = null
         private set
