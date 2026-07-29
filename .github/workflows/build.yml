@@ -145,21 +145,20 @@ jobs:
           ASSET_NAME="AirPlayCast-v1.0.1-debug.apk"
           cp "$SRC_APK" "$ASSET_NAME"
           COMMIT_SHA=$(git rev-parse --short HEAD)
+          # 用 printf 生成 notes，避免 shell 多行字符串在 YAML run 块中的转义歧义
+          NOTES=$(printf 'AirPlay 投屏 App v1.0.1 (构建: %s)\n\n## 修复\n- 修复 baseUrl 字符串模板转义错误 (Invalid URL port) 导致扫描到设备但无法连接的根本问题' "$COMMIT_SHA")
           # 已存在则覆盖产物，否则新建 Release
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG 已存在，覆盖上传 APK..."
             gh release upload "$TAG" "$ASSET_NAME" --clobber
-            gh release edit "$TAG" --notes "AirPlay 投屏 App v1.0.1 (最新构建: ${COMMIT_SHA})" --target main
+            gh release edit "$TAG" --notes "$NOTES" --target main
             # 清理历史遗留的默认名产物 (app-debug.apk)
             gh release delete-asset "$TAG" app-debug.apk 2>/dev/null || true
           else
             echo "创建 Release $TAG..."
             gh release create "$TAG" "$ASSET_NAME" \
               --title "AirPlayCast v1.0.1" \
-              --notes "AirPlay 投屏 App v1.0.1 (构建: ${COMMIT_SHA})
-
-          ## 修复
-          - 修复 baseUrl 字符串模板转义错误 (Invalid URL port) 导致扫描到设备但无法连接的根本问题" \
+              --notes "$NOTES" \
               --target main
           fi
           echo "Release 发布完成: https://github.com/${{ github.repository }}/releases/tag/$TAG"
