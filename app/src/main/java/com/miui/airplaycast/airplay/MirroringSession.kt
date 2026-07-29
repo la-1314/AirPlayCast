@@ -33,7 +33,8 @@ object MirroringSession {
         height: Int,
         context: Context,
         onPinRequired: (suspend (errorHint: String?) -> String?)?
-    ): AirPlayResult<Unit> = airPlayTrySuspend {
+    ): AirPlayResult<Unit> = withContext(Dispatchers.IO) {
+        airPlayTrySuspend {
         if (_state.value is MirrorState.Running) {
             throw AirPlayException(AirPlayError.Unknown("镜像已在运行"))
         }
@@ -178,6 +179,7 @@ object MirroringSession {
         Log.e(TAG, "Mirror start failed: ${error.displayText}")
         _state.value = MirrorState.Error(error.displayText)
         cleanup()
+    }
     }
 
     fun stop() {

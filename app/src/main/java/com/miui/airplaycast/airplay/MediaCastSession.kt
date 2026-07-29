@@ -2,7 +2,12 @@ package com.miui.airplaycast.airplay
 
 import android.util.Log
 import com.miui.airplaycast.discovery.AirPlayDevice
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
@@ -17,6 +22,7 @@ class MediaCastSession(
     }
 
     private val client = AirPlayHttpClient(device)
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val _state = MutableStateFlow<MediaCastState>(MediaCastState.Idle)
     val state: StateFlow<MediaCastState> = _state.asStateFlow()
@@ -40,7 +46,7 @@ class MediaCastSession(
         url: String,
         startPosition: Double = 0.0,
         onPinRequired: (suspend (errorHint: String?) -> String?)? = null
-    ): Boolean {
+    ): Boolean = withContext(Dispatchers.IO) {
         _state.value = MediaCastState.Connecting
         _lastError.value = null
 
@@ -74,7 +80,7 @@ class MediaCastSession(
                                 val err = AirPlayError.PairingRequired("用户取消 PIN 输入")
                                 _lastError.value = err
                                 _state.value = MediaCastState.Error(err.displayText)
-                                return false
+                                return@withContext false
                             }
                             when (val pairResult = pairing.pairSetupWithPin(pin)) {
                                 is AirPlayResult.Success -> {
@@ -86,7 +92,7 @@ class MediaCastSession(
                                     if (attempts >= maxAttempts) {
                                         _lastError.value = pairResult.error
                                         _state.value = MediaCastState.Error(pairResult.error.displayText)
-                                        return false
+                                        return@withContext false
                                     }
                                     Log.w(TAG, "PIN pairing attempt $attempts failed: ${pairResult.error.displayText}, retrying...")
                                 }
@@ -105,7 +111,7 @@ class MediaCastSession(
             is AirPlayResult.Success -> Log.i(TAG, "Reverse channel started")
         }
 
-        return when (val playResult = client.play(url, startPosition)) {
+        when (val playResult = client.play(url, startPosition)) {
             is AirPlayResult.Success -> {
                 _state.value = MediaCastState.Playing
                 Log.i(TAG, "playUrl ok: $url @ ${device.name}")
@@ -120,43 +126,57 @@ class MediaCastSession(
         }
     }
 
-    fun resume(): Boolean {
-        return when (val r = client.resume()) {
-            is AirPlayResult.Success -> { _state.value = MediaCastState.Playing; true }
-            is AirPlayResult.Failure -> { _lastError.value = r.error; false }
+    fun resume() {
+        ioScope.launch {
+            when (val r = client.resume()) {
+                is AirPlayResult.Success -> _state.value = MediaCastState.Playing
+                is AirPlayResult.Failure -> _lastError.value = r.error
+            }
         }
     }
 
-    fun pause(): Boolean {
-        return when (val r = client.pause()) {
-            is AirPlayResult.Success -> { _state.value = MediaCastState.Paused; true }
-            is AirPlayResult.Failure -> { _lastError.value = r.error; false }
+    fun pause() {
+        ioScope.launch {
+            when (val r = client.pause()) {
+                is AirPlayResult.Success -> _state.value = MediaCastState.Paused
+                is AirPlayResult.Failure -> _lastError.value = r.error
+            }
         }
     }
 
     fun stop() {
-        client.stop()
-        client.close()
-        _state.value = MediaCastState.Idle
-        _progress.value = MediaProgress(0.0, 0.0)
-    }
-
-    fun seekTo(seconds: Double): Boolean {
-        return when (val r = client.scrub(seconds)) {
-            is AirPlayResult.Success -> { updateProgress(); true }
-            is AirPlayResult.Failure -> { _lastError.value = r.error; false }
+        ioScope.launch {
+            client.stop()
+            client.close()
+            _state.value = MediaCastState.Idle
+            _progress.value = MediaProgress(0.0, 0.0)
         }
     }
 
-    fun setVolume(v: Float): Boolean {
+    fun seekTo(seconds: Double) {
+        ioScope.launch {
+            when (val r = client.scrub(seconds)) {
+                is AirPlayResult.Success -> queryProgress()
+                is AirPlayResult.Failure -> _lastError.value = r.error
+            }
+        }
+    }
+
+    fun setVolume(v: Float) {
         val clamped = v.coerceIn(0f, 1f)
-        return when (val r = client.setVolume(clamped)) {
-            is AirPlayResult.Success -> { _volume.value = clamped; true }
-            is AirPlayResult.Failure -> { _lastError.value = r.error; false }
+        ioScope.launch {
+            when (val r = client.setVolume(clamped)) {
+                is AirPlayResult.Success -> _volume.value = clamped
+                is AirPlayResult.Failure -> _lastError.value = r.error
+            }
         }
     }
 
     fun updateProgress() {
+        ioScope.launch { queryProgress() }
+    }
+
+    private suspend fun queryProgress() {
         if (_state.value !is MediaCastState.Playing) return
         when (val r = client.queryScrub()) {
             is AirPlayResult.Success -> {
